@@ -11,7 +11,7 @@ from src.navigation import NavigationPolicy
 
 def main():
 
-    camera = Camera(camera_index=0)
+    camera = Camera(camera_index=2)
 
     detector = ObjectDetector(
         model_path="yolov8n.pt",

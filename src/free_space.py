@@ -1,11 +1,16 @@
 import cv2
 import numpy as np
+import os 
 
+# Raíz del proyecto para guardar calibraciones = carpeta padre de src/
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CALIB_PATH = os.path.join(PROJECT_ROOT, "config", "floor_calibration.npz")
 
 class ColorModel:
     """Modelo de color del piso en Lab (media + covarianza)."""
 
     REG = 10.0
+    MAX_PIXELS = 2000   # píxeles que se conservan por muestra (mantiene el archivo pequeño)
 
     def __init__(self):
         self.samples = []
@@ -16,13 +21,24 @@ class ColorModel:
     def ready(self):
         return self.mean is not None
 
-    def add_samples(self, bgr_patch):
-        lab = cv2.cvtColor(bgr_patch, cv2.COLOR_BGR2LAB)
-        self.samples.append(lab.reshape(-1, 3).astype(np.float32))
+    def _fit(self):
         data = np.vstack(self.samples)
         self.mean = data.mean(axis=0)
         cov = np.cov(data.T) + np.eye(3, dtype=np.float32) * self.REG
         self.icov = np.linalg.inv(cov).astype(np.float32)
+
+    def add_samples(self, bgr_patch):
+        lab = cv2.cvtColor(bgr_patch, cv2.COLOR_BGR2LAB)
+        lab = lab.reshape(-1, 3).astype(np.float32)
+        if len(lab) > self.MAX_PIXELS:
+            idx = np.random.choice(len(lab), self.MAX_PIXELS, replace=False)
+            lab = lab[idx]
+        self.samples.append(lab)
+        self._fit()
+
+    def set_samples(self, samples):
+        self.samples = list(samples)
+        self._fit()
 
     def reset(self):
         self.samples, self.mean, self.icov = [], None, None
@@ -42,6 +58,7 @@ class FreeSpaceDetector:
         self.roi_start = roi_start
         self.floor = ColorModel()
         self.current_roi = None
+        self.load_calibration()
 
         self.window_name = "Floor Calibration"
         cv2.namedWindow(self.window_name)
@@ -51,17 +68,47 @@ class FreeSpaceDetector:
         h, w = roi.shape[:2]
         return int(h * 0.60), int(h * 0.95), int(w * 0.35), int(w * 0.65)
 
+    def save_calibration(self):
+        if not self.floor.ready:
+            print("No hay calibración que guardar")
+            return
+        os.makedirs(os.path.dirname(CALIB_PATH), exist_ok=True)
+        np.savez(
+            CALIB_PATH,
+            samples=np.vstack(self.floor.samples),
+            counts=np.array([len(s) for s in self.floor.samples]),
+            threshold=cv2.getTrackbarPos("Umbral x10", self.window_name),
+        )
+        print(f"Calibración guardada en {CALIB_PATH}")
+
+    def load_calibration(self):
+        if not os.path.exists(CALIB_PATH):
+            print("No hay calibración guardada; calibra con 'c' y guarda con 's'")
+            return
+        try:
+            data = np.load(CALIB_PATH)
+            chunks = np.split(data["samples"], np.cumsum(data["counts"])[:-1])
+            self.floor.set_samples(chunks)
+            cv2.setTrackbarPos("Umbral x10", self.window_name, int(data["threshold"]))
+            print(f"Calibración cargada: {len(chunks)} muestras")
+        except Exception as e:
+            print(f"No se pudo cargar la calibración: {e}")
+
     def handle_key(self, key):
-        """c = añadir muestra de piso | r = reiniciar."""
+        """c = añadir muestra | s = guardar | l = recargar | r = reiniciar."""
         if self.current_roi is None:
             return
         if key == ord("c"):
             y1, y2, x1, x2 = self._guide_box(self.current_roi)
             self.floor.add_samples(self.current_roi[y1:y2, x1:x2])
             print(f"Muestras de piso: {len(self.floor.samples)}")
+        elif key == ord("s"):
+            self.save_calibration()
+        elif key == ord("l"):
+            self.load_calibration()
         elif key == ord("r"):
             self.floor.reset()
-            print("Modelo reiniciado")
+            print("Modelo reiniciado (el archivo guardado no se borra)")
 
     def extract_roi(self, frame):
         y_start = int(frame.shape[0] * self.roi_start)
